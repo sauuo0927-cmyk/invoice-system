@@ -286,13 +286,13 @@ async function pdfToBase64Images(file) {
 
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 2.0 }); // 2x 高解析度
+    const viewport = page.getViewport({ scale: 3.5 }); // 3.5x 高解析度，提升辨識正確率
     const canvas = document.createElement('canvas');
     canvas.width  = viewport.width;
     canvas.height = viewport.height;
     await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
     // 取得 base64（去掉 data:image/png;base64, 前綴）
-    images.push(canvas.toDataURL('image/png').split(',')[1]);
+    images.push(canvas.toDataURL('image/jpeg', 0.98).split(',')[1]);
   }
   return images;
 }
@@ -306,7 +306,7 @@ async function analyzeInvoice(file) {
     const pages = await pdfToBase64Images(file);
     if (!pages.length) throw new Error('PDF 轉換失敗，請確認檔案是否正常');
     // 只辨識第一頁（一份 PDF = 一張發票）
-    return await callClaudeWithImage(pages[0], 'image/png');
+    return await callClaudeWithImage(pages[0], 'image/jpeg');
   }
 
   // 一般圖片
