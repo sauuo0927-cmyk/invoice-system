@@ -308,12 +308,31 @@ async function analyzeInvoice(file) {
   const ext = file.name.split('.').pop().toLowerCase();
   const isPdf = ext === 'pdf';
 
-  // PDF：逐頁轉圖再辨識，取第一頁結果（大多數發票是單頁）
+  // PDF：轉換所有頁面，取資料最完整的結果
   if (isPdf) {
     const pages = await pdfToBase64Images(file);
     if (!pages.length) throw new Error('PDF 轉換失敗，請確認檔案是否正常');
-    // 只辨識第一頁（一份 PDF = 一張發票）
-    return await callClaudeWithImage(pages[0], 'image/jpeg');
+
+    // 若只有一頁直接辨識
+    if (pages.length === 1) return await callClaudeWithImage(pages[0], 'image/jpeg');
+
+    // 多頁：全部辨識，取資料最完整的（有發票號碼且金額不為 null 的）
+    const results = [];
+    for (const page of pages) {
+      try {
+        const result = await callClaudeWithImage(page, 'image/jpeg');
+        results.push(result);
+      } catch(e) { /* 跳過辨識失敗的頁 */ }
+    }
+    if (!results.length) throw new Error('所有頁面辨識失敗');
+
+    // 評分：有發票號碼+2，有總計+2，有未稅金額+1，有稅額+1
+    const scored = results.map(r => ({
+      r,
+      score: (r.invoice_number ? 2 : 0) + (r.total ? 2 : 0) + (r.amount ? 1 : 0) + (r.tax ? 1 : 0)
+    }));
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0].r;
   }
 
   // 一般圖片
