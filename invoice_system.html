@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>發票辨識系統</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -275,78 +275,32 @@ analyzeBtn.addEventListener('click', async () => {
   updateAnalyzeBtn();
 });
 
-// PDF 轉圖片（使用 PDF.js，在瀏覽器端執行）
-async function pdfToBase64Images(file) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-  const images = [];
-
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 4.0 }); // 4.0x 最高安全解析度
-    const canvas = document.createElement('canvas');
-    canvas.width  = viewport.width;
-    canvas.height = viewport.height;
-    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-    // 取得 base64（去掉 data:image/png;base64, 前綴）
-    // 超過 4.5MB 自動降低品質，避免超過 API 5MB 上限
-    let quality = 0.98;
-    let dataUrl = canvas.toDataURL('image/jpeg', quality);
-    while (dataUrl.length * 0.75 > 4.5 * 1024 * 1024 && quality > 0.7) {
-      quality -= 0.05;
-      dataUrl = canvas.toDataURL('image/jpeg', quality);
-    }
-    images.push(dataUrl.split(',')[1]);
-  }
-  return images;
-}
-
-async function analyzeInvoice(file) {
-  const ext = file.name.split('.').pop().toLowerCase();
-  const isPdf = ext === 'pdf';
-
-  // PDF：轉換所有頁面，取資料最完整的結果
-  if (isPdf) {
-    const pages = await pdfToBase64Images(file);
-    if (!pages.length) throw new Error('PDF 轉換失敗，請確認檔案是否正常');
-
-    // 若只有一頁直接辨識
-    if (pages.length === 1) return await callClaudeWithImage(pages[0], 'image/jpeg');
-
-    // 多頁：全部辨識，取資料最完整的（有發票號碼且金額不為 null 的）
-    const results = [];
-    for (const page of pages) {
-      try {
-        const result = await callClaudeWithImage(page, 'image/jpeg');
-        results.push(result);
-      } catch(e) { /* 跳過辨識失敗的頁 */ }
-    }
-    if (!results.length) throw new Error('所有頁面辨識失敗');
-
-    // 評分：有發票號碼+2，有總計+2，有未稅金額+1，有稅額+1
-    const scored = results.map(r => ({
-      r,
-      score: (r.invoice_number ? 2 : 0) + (r.total ? 2 : 0) + (r.amount ? 1 : 0) + (r.tax ? 1 : 0)
-    }));
-    scored.sort((a, b) => b.score - a.score);
-    return scored[0].r;
-  }
-
-  // 一般圖片
-  const b64 = await new Promise((res, rej) => {
+// 將檔案讀成 base64
+function fileToBase64(file) {
+  return new Promise((res, rej) => {
     const r = new FileReader();
     r.onload = () => res(r.result.split(',')[1]);
     r.onerror = rej;
     r.readAsDataURL(file);
   });
-  const mediaType = {jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp'}[ext] || 'image/jpeg';
-  return await callClaudeWithImage(b64, mediaType);
 }
 
-async function callClaudeWithImage(b64, mediaType) {
+async function analyzeInvoice(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  const b64 = await fileToBase64(file);
+
+  // PDF 直接以 application/pdf 傳給 Anthropic 後端處理（與 Claude.ai 相同品質）
+  // 圖片則依副檔名對應正確 media_type
+  const isPdf = ext === 'pdf';
+  const mediaType = isPdf
+    ? 'application/pdf'
+    : ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[ext] || 'image/jpeg');
+
+  // PDF 用 document block；圖片用 image block
+  const contentBlock = isPdf
+    ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } }
+    : { type: 'image',    source: { type: 'base64', media_type: mediaType, data: b64 } };
+
   const res = await fetch(WORKER_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -355,7 +309,7 @@ async function callClaudeWithImage(b64, mediaType) {
       max_tokens: 1000,
       system: SYSTEM,
       messages: [{ role: 'user', content: [
-        { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
+        contentBlock,
         { type: 'text', text: '請辨識這張發票，回傳 JSON。' }
       ]}]
     })
