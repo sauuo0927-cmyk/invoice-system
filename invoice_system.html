@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>發票辨識系統</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -274,16 +275,52 @@ analyzeBtn.addEventListener('click', async () => {
   updateAnalyzeBtn();
 });
 
+// PDF 轉圖片（使用 PDF.js，在瀏覽器端執行）
+async function pdfToBase64Images(file) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const images = [];
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale: 2.0 }); // 2x 高解析度
+    const canvas = document.createElement('canvas');
+    canvas.width  = viewport.width;
+    canvas.height = viewport.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    // 取得 base64（去掉 data:image/png;base64, 前綴）
+    images.push(canvas.toDataURL('image/png').split(',')[1]);
+  }
+  return images;
+}
+
 async function analyzeInvoice(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  const isPdf = ext === 'pdf';
+
+  // PDF：逐頁轉圖再辨識，取第一頁結果（大多數發票是單頁）
+  if (isPdf) {
+    const pages = await pdfToBase64Images(file);
+    if (!pages.length) throw new Error('PDF 轉換失敗，請確認檔案是否正常');
+    // 只辨識第一頁（一份 PDF = 一張發票）
+    return await callClaudeWithImage(pages[0], 'image/png');
+  }
+
+  // 一般圖片
   const b64 = await new Promise((res, rej) => {
     const r = new FileReader();
     r.onload = () => res(r.result.split(',')[1]);
     r.onerror = rej;
     r.readAsDataURL(file);
   });
-  const ext = file.name.split('.').pop().toLowerCase();
-  const mediaType = {jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp',pdf:'application/pdf'}[ext] || 'image/jpeg';
+  const mediaType = {jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp'}[ext] || 'image/jpeg';
+  return await callClaudeWithImage(b64, mediaType);
+}
 
+async function callClaudeWithImage(b64, mediaType) {
   const res = await fetch(WORKER_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
